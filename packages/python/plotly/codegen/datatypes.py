@@ -1,6 +1,5 @@
 import os.path as opath
 import textwrap
-from io import StringIO
 
 from codegen.utils import write_source_py
 
@@ -48,18 +47,19 @@ def build_datatype_py(node):
     datatype_class = node.name_datatype_class
     literal_nodes = [n for n in node.child_literals if n.plotly_name in ["type"]]
 
-    buffer = StringIO()
+    buffer_parts = []
 
-    buffer.write(
+    buffer_parts.append(
         f"from plotly.basedatatypes "
         f"import {node.name_base_datatype} as _{node.name_base_datatype}\n"
     )
-    buffer.write(f"import copy as _copy\n")
+    buffer_parts.append("import copy as _copy\n")
 
-    buffer.write(
+    buffer_parts.append(
         f"""
 
-class {datatype_class}(_{node.name_base_datatype}):\n"""
+class {datatype_class}(_{node.name_base_datatype}):
+"""
     )
 
     # ### Layout subplot properties ###
@@ -70,13 +70,13 @@ class {datatype_class}(_{node.name_base_datatype}):\n"""
             if node.node_data.get("_isSubplotObj", False)
         ]
         subplot_names = [n.name_property for n in subplot_nodes]
-        buffer.write(
+        buffer_parts.append(
             f"""
     _subplotid_prop_names = {repr(subplot_names)}
 
     import re
     _subplotid_prop_re = re.compile(
-        '^(' + '|'.join(_subplotid_prop_names) + r')(\d+)$')
+        r'^(' + '|'.join({repr(subplot_names)}) + r')(\\d+)$')
 """
         )
 
@@ -92,7 +92,7 @@ class {datatype_class}(_{node.name_base_datatype}):\n"""
             + "}"
         )
 
-        buffer.write(
+        buffer_parts.append(
             f"""
     @property
     def _subplotid_validators(self):
@@ -117,7 +117,7 @@ class {datatype_class}(_{node.name_base_datatype}):\n"""
     valid_props_list = sorted(
         [node.name_property for node in subtype_nodes + literal_nodes]
     )
-    buffer.write(
+    buffer_parts.append(
         f"""
     # class properties
     # --------------------
@@ -175,7 +175,7 @@ class {datatype_class}(_{node.name_base_datatype}):\n"""
             property_docstring = property_description
 
         # #### Write get property ####
-        buffer.write(
+        buffer_parts.append(
             f"""\
 
     # {subtype_node.name_property}
@@ -193,7 +193,7 @@ class {datatype_class}(_{node.name_base_datatype}):\n"""
         )
 
         # #### Write set property ####
-        buffer.write(
+        buffer_parts.append(
             f"""
 
     @{subtype_node.name_property}.setter
@@ -203,7 +203,7 @@ class {datatype_class}(_{node.name_base_datatype}):\n"""
 
         # ### Literals ###
     for literal_node in literal_nodes:
-        buffer.write(
+        buffer_parts.append(
             f"""\
 
     # {literal_node.name_property}
@@ -215,7 +215,7 @@ class {datatype_class}(_{node.name_base_datatype}):\n"""
 
     # ### Private properties descriptions ###
 
-    buffer.write(
+    buffer_parts.append(
         f"""
     # Self properties description
     # ---------------------------
@@ -224,9 +224,9 @@ class {datatype_class}(_{node.name_base_datatype}):\n"""
         return \"\"\"\\"""
     )
 
-    buffer.write(node.get_constructor_params_docstring(indent=8))
+    buffer_parts.append(node.get_constructor_params_docstring(indent=8))
 
-    buffer.write(
+    buffer_parts.append(
         f"""
         \"\"\""""
     )
@@ -234,19 +234,19 @@ class {datatype_class}(_{node.name_base_datatype}):\n"""
     mapped_nodes = [n for n in subtype_nodes if n.is_mapped]
     mapped_properties = {n.plotly_name: n.relative_path for n in mapped_nodes}
     if mapped_properties:
-        buffer.write(
+        buffer_parts.append(
             f"""
 
     _mapped_properties = {repr(mapped_properties)}"""
         )
 
     # ### Constructor ###
-    buffer.write(
+    buffer_parts.append(
         f"""
     def __init__(self"""
     )
 
-    add_constructor_params(buffer, subtype_nodes, prepend_extras=["arg"])
+    add_constructor_params(buffer_parts, subtype_nodes, prepend_extras=["arg"])
 
     # ### Constructor Docstring ###
     header = f"Construct a new {datatype_class} object"
@@ -263,14 +263,14 @@ class {datatype_class}(_{node.name_base_datatype}):\n"""
     ]
 
     add_docstring(
-        buffer,
+        buffer_parts,
         node,
         header=header,
         prepend_extras=extras,
         return_type=node.name_datatype_class,
     )
 
-    buffer.write(
+    buffer_parts.append(
         f"""
         super({datatype_class}, self).__init__('{node.name_property}')
 
@@ -281,7 +281,7 @@ class {datatype_class}(_{node.name_base_datatype}):\n"""
     )
 
     if datatype_class == "Layout":
-        buffer.write(
+        buffer_parts.append(
             f"""
         # Override _valid_props for instance so that instance can mutate set
         # to support subplot properties (e.g. xaxis2)
@@ -289,7 +289,7 @@ class {datatype_class}(_{node.name_base_datatype}):\n"""
 """
         )
 
-    buffer.write(
+    buffer_parts.append(
         f"""
         # Validate arg
         # ------------
@@ -312,7 +312,7 @@ an instance of :class:`{class_name}`\"\"\")
         """
     )
 
-    buffer.write(
+    buffer_parts.append(
         f"""
 
         # Populate data dict with properties
@@ -320,7 +320,7 @@ an instance of :class:`{class_name}`\"\"\")
     )
     for subtype_node in subtype_nodes:
         name_prop = subtype_node.name_property
-        buffer.write(
+        buffer_parts.append(
             f"""
         _v = arg.pop('{name_prop}', None)
         _v = {name_prop} if {name_prop} is not None else _v
@@ -330,7 +330,7 @@ an instance of :class:`{class_name}`\"\"\")
 
     # ### Literals ###
     if literal_nodes:
-        buffer.write(
+        buffer_parts.append(
             f"""
 
         # Read-only literals
@@ -340,35 +340,13 @@ an instance of :class:`{class_name}`\"\"\")
         for literal_node in literal_nodes:
             lit_name = literal_node.name_property
             lit_val = repr(literal_node.node_data)
-            buffer.write(
+            buffer_parts.append(
                 f"""
-        # Handle literal property '{lit_name}' with proper error handling
-        try:
-            self._props['{lit_name}'] = {lit_val}
-        except (KeyError, TypeError, AttributeError) as _e:
-            # Handle cases where self._props doesn't exist or isn't accessible
-            import warnings
-            warnings.warn(
-                "Failed to set literal property '{lit_name}' to {lit_val}: " + str(_e),
-                RuntimeWarning,
-                stacklevel=2
+        self._props['{lit_name}'] = {lit_val}
+        arg.pop('{lit_name}', None)"""
             )
 
-        # Safely remove literal from arguments if present
-        try:
-            arg.pop('{lit_name}', None)
-        except (AttributeError, TypeError) as _e:
-            # Handle cases where arg doesn't support pop() operation
-            import warnings
-            warnings.warn(
-                "Failed to remove literal property '{lit_name}' from "
-                "arguments: " + str(_e),
-                RuntimeWarning,
-                stacklevel=2
-            )"""
-            )
-
-    buffer.write(
+    buffer_parts.append(
         f"""
 
         # Process unknown kwargs
@@ -383,7 +361,7 @@ an instance of :class:`{class_name}`\"\"\")
 
     # Return source string
     # --------------------
-    return buffer.getvalue()
+    return ''.join(buffer_parts)
 
 
 def reindent_validator_description(validator, extra_indent):
@@ -397,44 +375,44 @@ def reindent_validator_description(validator, extra_indent):
 
 
 def add_constructor_params(
-    buffer, subtype_nodes, prepend_extras=(), append_extras=(), output_type=None
+    buffer_parts, subtype_nodes, prepend_extras=(), append_extras=(), output_type=None
 ):
     """
     Write datatype constructor params to a buffer
     """
     for extra in prepend_extras:
-        buffer.write(
+        buffer_parts.append(
             f""",
             {extra}=None"""
         )
 
     for i, subtype_node in enumerate(subtype_nodes):
-        buffer.write(
+        buffer_parts.append(
             f""",
             {subtype_node.name_property}=None"""
         )
 
     for extra in append_extras:
-        buffer.write(
+        buffer_parts.append(
             f""",
             {extra}=None"""
         )
 
-    buffer.write(
+    buffer_parts.append(
         """,
             **kwargs"""
     )
-    buffer.write(
+    buffer_parts.append(
         """
         )"""
     )
     if output_type:
-        buffer.write(f"-> '{output_type}'")
-    buffer.write(":")
+        buffer_parts.append(f"-> '{output_type}'")
+    buffer_parts.append(":")
 
 
 def add_docstring(
-    buffer, node, header, prepend_extras=(), append_extras=(), return_type=None
+    buffer_parts, node, header, prepend_extras=(), append_extras=(), return_type=None
 ):
     """
     Write docstring for a compound datatype node
@@ -450,7 +428,7 @@ def add_docstring(
         )
 
         node_description = "\n".join(description_lines) + "\n\n"
-    buffer.write(
+    buffer_parts.append(
         f"""
         \"\"\"
         {header}
@@ -464,14 +442,14 @@ def add_docstring(
                 v, width=79 - 12, initial_indent=" " * 12, subsequent_indent=" " * 12
             )
         )
-        buffer.write(
+        buffer_parts.append(
             f"""
         {p}
 {v_wrapped}"""
         )
 
     # Write core docstring
-    buffer.write(node.get_constructor_params_docstring(indent=8))
+    buffer_parts.append(node.get_constructor_params_docstring(indent=8))
 
     # Write any append extras
     for p, v in append_extras:
@@ -486,12 +464,12 @@ def add_docstring(
                     subsequent_indent=" " * 12,
                 )
             )
-        buffer.write(
+        buffer_parts.append(
             f"""
         {p}
 {v_wrapped}"""
         )
-    buffer.write(
+    buffer_parts.append(
         f"""
 
         Returns
