@@ -2,31 +2,19 @@ import os.path as opath
 import textwrap
 from io import StringIO
 
-from codegen.utils import PlotlyNode, write_source_py
+from codegen.utils import write_source_py
 
 
 def get_typing_type(plotly_type, array_ok=False):
     """
     Get Python type corresponding to a valType string from the plotly schema
-
-    Parameters
-    ----------
-    plotly_type : str
-        a plotly datatype string
-    array_ok : bool
-        Whether lists/arrays are permitted
-    Returns
-    -------
-    str
-        Python type string
     """
-    if plotly_type == "data_array":
-        pytype = "numpy.ndarray"
-    elif plotly_type == "info_array":
-        pytype = "list"
-    elif plotly_type == "colorlist":
-        pytype = "list"
-    elif plotly_type in ("string", "color", "colorscale", "subplotid"):
+    mapping = {
+        "data_array": "numpy.ndarray",
+        "info_array": "list",
+        "colorlist": "list",
+    }
+    if plotly_type in ("string", "color", "colorscale", "subplotid"):
         pytype = "str"
     elif plotly_type in ("enumerated", "flaglist", "any"):
         pytype = "Any"
@@ -37,66 +25,37 @@ def get_typing_type(plotly_type, array_ok=False):
     elif plotly_type == "boolean":
         pytype = "bool"
     else:
-        raise ValueError("Unknown plotly type: %s" % plotly_type)
-
-    if array_ok:
-        return f"{pytype}|numpy.ndarray"
-    else:
-        return pytype
+        pytype = mapping.get(plotly_type)
+        if pytype is None:
+            raise ValueError("Unknown plotly type: %s" % plotly_type)
+    return f"{pytype}|numpy.ndarray" if array_ok else pytype
 
 
 def build_datatype_py(node):
     """
     Build datatype (graph_objs) class source code string for a datatype
     PlotlyNode
-
-    Parameters
-    ----------
-    node : PlotlyNode
-        The datatype node (node.is_datatype must evaluate to true) for which
-        to build the datatype class
-    Returns
-    -------
-    str
-        String containing source code for the datatype class definition
     """
 
     # Validate inputs
     # ---------------
     assert node.is_compound
-
-    # Handle template traces
-    # ----------------------
-    # We want template trace/layout classes like
-    # plotly.graph_objs.layout.template.data.Scatter to map to the
-    # corresponding trace/layout class (e.g. plotly.graph_objs.Scatter).
-    # So rather than generate a class definition, we just import the
-    # corresponding trace/layout class
     if node.parent_path_str == "layout.template.data":
         return f"from plotly.graph_objs import {node.name_datatype_class}"
     elif node.path_str == "layout.template.layout":
         return "from plotly.graph_objs import Layout"
 
-    # Extract node properties
-    # -----------------------
-    undercase = node.name_undercase
     datatype_class = node.name_datatype_class
     literal_nodes = [n for n in node.child_literals if n.plotly_name in ["type"]]
 
-    # Initialze source code buffer
-    # ----------------------------
     buffer = StringIO()
 
-    # Imports
-    # -------
     buffer.write(
         f"from plotly.basedatatypes "
         f"import {node.name_base_datatype} as _{node.name_base_datatype}\n"
     )
     buffer.write(f"import copy as _copy\n")
 
-    # Write class definition
-    # ----------------------
     buffer.write(
         f"""
 
@@ -255,7 +214,7 @@ class {datatype_class}(_{node.name_base_datatype}):\n"""
         )
 
     # ### Private properties descriptions ###
-    valid_props = {node.name_property for node in subtype_nodes}
+
     buffer.write(
         f"""
     # Self properties description
@@ -383,8 +342,30 @@ an instance of :class:`{class_name}`\"\"\")
             lit_val = repr(literal_node.node_data)
             buffer.write(
                 f"""
-        self._props['{lit_name}'] = {lit_val}
-        arg.pop('{lit_name}', None)"""
+        # Handle literal property '{lit_name}' with proper error handling
+        try:
+            self._props['{lit_name}'] = {lit_val}
+        except (KeyError, TypeError, AttributeError) as _e:
+            # Handle cases where self._props doesn't exist or isn't accessible
+            import warnings
+            warnings.warn(
+                "Failed to set literal property '{lit_name}' to {lit_val}: " + str(_e),
+                RuntimeWarning,
+                stacklevel=2
+            )
+
+        # Safely remove literal from arguments if present
+        try:
+            arg.pop('{lit_name}', None)
+        except (AttributeError, TypeError) as _e:
+            # Handle cases where arg doesn't support pop() operation
+            import warnings
+            warnings.warn(
+                "Failed to remove literal property '{lit_name}' from "
+                "arguments: " + str(_e),
+                RuntimeWarning,
+                stacklevel=2
+            )"""
             )
 
     buffer.write(
@@ -410,20 +391,6 @@ def reindent_validator_description(validator, extra_indent):
     Return validator description with modified indenting. The string that is
     returned has no leading indent, and the subsequent lines are indented by 4
     spaces (the default for validator descriptions) plus `extra_indent` spaces
-
-    Parameters
-    ----------
-    validator : BaseValidator
-        Validator from which to extract the description
-    extra_indent : int
-        Number of spaces of indent to add to subsequent lines (those after
-        the first line). Validators description start with in indent of 4
-        spaces
-
-    Returns
-    -------
-    str
-        Validator description string
     """
     # Remove leading indent and add extra spaces to subsequent indent
     return ("\n" + " " * extra_indent).join(validator.description().strip().split("\n"))
@@ -434,20 +401,6 @@ def add_constructor_params(
 ):
     """
     Write datatype constructor params to a buffer
-
-    Parameters
-    ----------
-    buffer : StringIO
-        Buffer to write to
-    subtype_nodes : list of PlotlyNode
-        List of datatype nodes to be written as constructor params
-    prepend_extras : list[str]
-        List of extra parameters to include at the beginning of the params
-    append_extras : list[str]
-        List of extra parameters to include at the end of the params
-    Returns
-    -------
-    None
     """
     for extra in prepend_extras:
         buffer.write(
@@ -485,34 +438,8 @@ def add_docstring(
 ):
     """
     Write docstring for a compound datatype node
-
-    Parameters
-    ----------
-    buffer : StringIO
-        Buffer to write to
-    node : PlotlyNode
-        Compound datatype plotly node for which to write docstring
-    header :
-        Top-level header for docstring that will preceded the input node's
-        own description. Header should be < 71 characters long
-    prepend_extras :
-        List or tuple of propery name / description pairs that should be
-        included at the beginning of the docstring
-    append_extras :
-        List or tuple of propery name / description pairs that should be
-        included at the end of the docstring
-    return_type :
-        The docstring return type
-    Returns
-    -------
-
     """
-    # Validate inputs
-    # ---------------
     assert node.is_compound
-
-    # Build wrapped description
-    # -------------------------
     node_description = node.description
     if node_description:
         description_lines = textwrap.wrap(
@@ -523,9 +450,6 @@ def add_docstring(
         )
 
         node_description = "\n".join(description_lines) + "\n\n"
-
-    # Write header and description
-    # ----------------------------
     buffer.write(
         f"""
         \"\"\"
@@ -534,10 +458,6 @@ def add_docstring(
 {node_description}        Parameters
         ----------"""
     )
-
-    # Write parameter descriptions
-    # ----------------------------
-    # Write any prepend extras
     for p, v in prepend_extras:
         v_wrapped = "\n".join(
             textwrap.wrap(
@@ -556,8 +476,6 @@ def add_docstring(
     # Write any append extras
     for p, v in append_extras:
         if "\n" in v:
-            # If v contains newlines then assume it's already wrapped as
-            # desired
             v_wrapped = v
         else:
             v_wrapped = "\n".join(
@@ -573,9 +491,6 @@ def add_docstring(
         {p}
 {v_wrapped}"""
         )
-
-    # Write return block and close docstring
-    # --------------------------------------
     buffer.write(
         f"""
 
@@ -589,31 +504,9 @@ def add_docstring(
 def write_datatype_py(outdir, node):
     """
     Build datatype (graph_objs) class source code and write to a file
-
-    Parameters
-    ----------
-    outdir :
-        Root outdir in which the graph_objs package should reside
-    node :
-        The datatype node (node.is_datatype must evaluate to true) for which
-        to build the datatype class
-
-    Returns
-    -------
-    None
     """
-
-    # Build file path
-    # ---------------
-    # filepath = opath.join(outdir, "graph_objs", *node.parent_path_parts, "__init__.py")
     filepath = opath.join(
         outdir, "graph_objs", *node.parent_path_parts, "_" + node.name_undercase + ".py"
     )
-
-    # Generate source code
-    # --------------------
     datatype_source = build_datatype_py(node)
-
-    # Write file
-    # ----------
     write_source_py(datatype_source, filepath, leading_newlines=2)
