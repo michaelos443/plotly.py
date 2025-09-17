@@ -1,8 +1,45 @@
 import os.path as opath
 import textwrap
 from io import StringIO
+import re
 
 from codegen.utils import write_source_py
+
+
+def sanitize_identifier(name):
+    """
+    Sanitize a name to be a valid Python identifier and prevent code injection.
+
+    Parameters
+    ----------
+    name : str
+        The name to sanitize
+
+    Returns
+    -------
+    str
+        A sanitized version of the name that is safe to use as a Python identifier
+    """
+    if not isinstance(name, str):
+        raise ValueError("Name must be a string")
+
+    # Remove any characters that aren't alphanumeric or underscore
+    sanitized = re.sub(r'[^a-zA-Z0-9_]', '_', name)
+
+    # Ensure it starts with a letter or underscore
+    if sanitized and not re.match(r'^[a-zA-Z_]', sanitized):
+        sanitized = '_' + sanitized
+
+    # Ensure it's not empty
+    if not sanitized:
+        sanitized = '_unnamed'
+
+    # Ensure it's not a Python keyword
+    import keyword
+    if keyword.iskeyword(sanitized):
+        sanitized = sanitized + '_'
+
+    return sanitized
 
 
 def get_typing_type(plotly_type, array_ok=False):
@@ -54,13 +91,12 @@ def build_datatype_py(node):
         f"from plotly.basedatatypes "
         f"import {node.name_base_datatype} as _{node.name_base_datatype}\n"
     )
-    buffer.write("import copy as _copy\n")
+    buffer.write(f"import copy as _copy\n")
 
     buffer.write(
         f"""
 
-class {datatype_class}(_{node.name_base_datatype}):
-"""
+class {datatype_class}(_{node.name_base_datatype}):\n"""
     )
 
     # ### Layout subplot properties ###
@@ -70,14 +106,14 @@ class {datatype_class}(_{node.name_base_datatype}):
             for node in node.child_compound_datatypes
             if node.node_data.get("_isSubplotObj", False)
         ]
-        subplot_names = [n.name_property for n in subplot_nodes]
+        subplot_names = [sanitize_identifier(n.name_property) for n in subplot_nodes]
         buffer.write(
             f"""
     _subplotid_prop_names = {repr(subplot_names)}
 
     import re
     _subplotid_prop_re = re.compile(
-        r'^(' + '|'.join(_subplotid_prop_names) + r')(\\d+)$')
+        '^(' + '|'.join(_subplotid_prop_names) + r')(\d+)$')
 """
         )
 
@@ -116,7 +152,7 @@ class {datatype_class}(_{node.name_base_datatype}):
     child_datatype_nodes = node.child_datatypes
     subtype_nodes = child_datatype_nodes
     valid_props_list = sorted(
-        [node.name_property for node in subtype_nodes + literal_nodes]
+        [sanitize_identifier(node.name_property) for node in subtype_nodes + literal_nodes]
     )
     buffer.write(
         f"""
@@ -176,13 +212,14 @@ class {datatype_class}(_{node.name_base_datatype}):
             property_docstring = property_description
 
         # #### Write get property ####
+        sanitized_name = sanitize_identifier(subtype_node.name_property)
         buffer.write(
-            f"""
+            f"""\
 
-    # {subtype_node.name_property}
-    # {'-' * len(subtype_node.name_property)}
+    # {sanitized_name}
+    # {'-' * len(sanitized_name)}
     @property
-    def {subtype_node.name_property}(self):
+    def {sanitized_name}(self):
         \"\"\"
 {property_docstring}
 
@@ -190,47 +227,48 @@ class {datatype_class}(_{node.name_base_datatype}):
         -------
         {prop_type}
         \"\"\"
-        return self['{subtype_node.name_property}']"""
+        return self['{sanitized_name}']"""
         )
 
         # #### Write set property ####
+        sanitized_name = sanitize_identifier(subtype_node.name_property)
         buffer.write(
             f"""
 
-    @{subtype_node.name_property}.setter
-    def {subtype_node.name_property}(self, val):
-        self['{subtype_node.name_property}'] = val
-"""
+    @{sanitized_name}.setter
+    def {sanitized_name}(self, val):
+        self['{sanitized_name}'] = val\n"""
         )
 
         # ### Literals ###
     for literal_node in literal_nodes:
+        sanitized_name = sanitize_identifier(literal_node.name_property)
         buffer.write(
-            f"""
+            f"""\
 
-    # {literal_node.name_property}
-    # {'-' * len(literal_node.name_property)}
+    # {sanitized_name}
+    # {'-' * len(sanitized_name)}
     @property
-    def {literal_node.name_property}(self):
-        return self._props['{literal_node.name_property}']
-"""
+    def {sanitized_name}(self):
+        return self._props['{sanitized_name}']\n"""
         )
 
     # ### Private properties descriptions ###
 
     buffer.write(
-        """
+        f"""
     # Self properties description
     # ---------------------------
-    @property"""
+    @property
+    def _prop_descriptions(self):
+        return \"\"\"\\"""
     )
 
     buffer.write(node.get_constructor_params_docstring(indent=8))
 
     buffer.write(
-        """
-    def _prop_descriptions(self):
-        return \"\"\"\\"""
+        f"""
+        \"\"\""""
     )
 
     mapped_nodes = [n for n in subtype_nodes if n.is_mapped]
@@ -244,7 +282,7 @@ class {datatype_class}(_{node.name_base_datatype}):
 
     # ### Constructor ###
     buffer.write(
-        """
+        f"""
     def __init__(self"""
     )
 
@@ -258,7 +296,7 @@ class {datatype_class}(_{node.name_base_datatype}):
 
     extras = [
         (
-            "arg",
+            f"arg",
             f"dict of properties compatible with this constructor "
             f"or an instance of :class:`{class_name}`",
         )
@@ -274,7 +312,7 @@ class {datatype_class}(_{node.name_base_datatype}):
 
     buffer.write(
         f"""
-        super({datatype_class}, self).__init__('{node.name_property}')
+        super({datatype_class}, self).__init__('{sanitize_identifier(node.name_property)}')
 
         if '_parent' in kwargs:
             self._parent = kwargs['_parent']
@@ -315,13 +353,13 @@ an instance of :class:`{class_name}`\"\"\")
     )
 
     buffer.write(
-        """
+        f"""
 
         # Populate data dict with properties
         # ----------------------------------"""
     )
     for subtype_node in subtype_nodes:
-        name_prop = subtype_node.name_property
+        name_prop = sanitize_identifier(subtype_node.name_property)
         buffer.write(
             f"""
         _v = arg.pop('{name_prop}', None)
@@ -333,14 +371,14 @@ an instance of :class:`{class_name}`\"\"\")
     # ### Literals ###
     if literal_nodes:
         buffer.write(
-            """
+            f"""
 
         # Read-only literals
         # ------------------
 """
         )
         for literal_node in literal_nodes:
-            lit_name = literal_node.name_property
+            lit_name = sanitize_identifier(literal_node.name_property)
             lit_val = repr(literal_node.node_data)
             buffer.write(
                 f"""
@@ -349,7 +387,7 @@ an instance of :class:`{class_name}`\"\"\")
             )
 
     buffer.write(
-        """
+        f"""
 
         # Process unknown kwargs
         # ----------------------
@@ -388,10 +426,10 @@ def add_constructor_params(
             {extra}=None"""
         )
 
-    for subtype_node in subtype_nodes:
+    for i, subtype_node in enumerate(subtype_nodes):
         buffer.write(
             f""",
-            {subtype_node.name_property}=None"""
+            {sanitize_identifier(subtype_node.name_property)}=None"""
         )
 
     for extra in append_extras:
