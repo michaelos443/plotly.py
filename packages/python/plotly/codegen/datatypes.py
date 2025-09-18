@@ -1,45 +1,10 @@
+import os
 import os.path as opath
 import textwrap
+import json
 from io import StringIO
-import re
 
 from codegen.utils import write_source_py
-
-
-def sanitize_identifier(name):
-    """
-    Sanitize a name to be a valid Python identifier and prevent code injection.
-
-    Parameters
-    ----------
-    name : str
-        The name to sanitize
-
-    Returns
-    -------
-    str
-        A sanitized version of the name that is safe to use as a Python identifier
-    """
-    if not isinstance(name, str):
-        raise ValueError("Name must be a string")
-
-    # Remove any characters that aren't alphanumeric or underscore
-    sanitized = re.sub(r'[^a-zA-Z0-9_]', '_', name)
-
-    # Ensure it starts with a letter or underscore
-    if sanitized and not re.match(r'^[a-zA-Z_]', sanitized):
-        sanitized = '_' + sanitized
-
-    # Ensure it's not empty
-    if not sanitized:
-        sanitized = '_unnamed'
-
-    # Ensure it's not a Python keyword
-    import keyword
-    if keyword.iskeyword(sanitized):
-        sanitized = sanitized + '_'
-
-    return sanitized
 
 
 def get_typing_type(plotly_type, array_ok=False):
@@ -106,7 +71,7 @@ class {datatype_class}(_{node.name_base_datatype}):\n"""
             for node in node.child_compound_datatypes
             if node.node_data.get("_isSubplotObj", False)
         ]
-        subplot_names = [sanitize_identifier(n.name_property) for n in subplot_nodes]
+        subplot_names = [n.name_property for n in subplot_nodes]
         buffer.write(
             f"""
     _subplotid_prop_names = {repr(subplot_names)}
@@ -152,14 +117,14 @@ class {datatype_class}(_{node.name_base_datatype}):\n"""
     child_datatype_nodes = node.child_datatypes
     subtype_nodes = child_datatype_nodes
     valid_props_list = sorted(
-        [sanitize_identifier(node.name_property) for node in subtype_nodes + literal_nodes]
+        [node.name_property for node in subtype_nodes + literal_nodes]
     )
     buffer.write(
         f"""
     # class properties
     # --------------------
-    _parent_path_str = '{node.parent_path_str}'
-    _path_str = '{node.path_str}'
+    _parent_path_str = {json.dumps(node.parent_path_str)}
+    _path_str = {json.dumps(node.path_str)}
     _valid_props = {{"{'", "'.join(valid_props_list)}"}}
 """
     )
@@ -212,14 +177,13 @@ class {datatype_class}(_{node.name_base_datatype}):\n"""
             property_docstring = property_description
 
         # #### Write get property ####
-        sanitized_name = sanitize_identifier(subtype_node.name_property)
         buffer.write(
             f"""\
 
-    # {sanitized_name}
-    # {'-' * len(sanitized_name)}
+    # {subtype_node.name_property}
+    # {'-' * len(subtype_node.name_property)}
     @property
-    def {sanitized_name}(self):
+    def {subtype_node.name_property}(self):
         \"\"\"
 {property_docstring}
 
@@ -227,30 +191,28 @@ class {datatype_class}(_{node.name_base_datatype}):\n"""
         -------
         {prop_type}
         \"\"\"
-        return self['{sanitized_name}']"""
+        return self['{subtype_node.name_property}']"""
         )
 
         # #### Write set property ####
-        sanitized_name = sanitize_identifier(subtype_node.name_property)
         buffer.write(
             f"""
 
-    @{sanitized_name}.setter
-    def {sanitized_name}(self, val):
-        self['{sanitized_name}'] = val\n"""
+    @{subtype_node.name_property}.setter
+    def {subtype_node.name_property}(self, val):
+        self['{subtype_node.name_property}'] = val\n"""
         )
 
         # ### Literals ###
     for literal_node in literal_nodes:
-        sanitized_name = sanitize_identifier(literal_node.name_property)
         buffer.write(
             f"""\
 
-    # {sanitized_name}
-    # {'-' * len(sanitized_name)}
+    # {literal_node.name_property}
+    # {'-' * len(literal_node.name_property)}
     @property
-    def {sanitized_name}(self):
-        return self._props['{sanitized_name}']\n"""
+    def {literal_node.name_property}(self):
+        return self._props['{literal_node.name_property}']\n"""
         )
 
     # ### Private properties descriptions ###
@@ -312,7 +274,7 @@ class {datatype_class}(_{node.name_base_datatype}):\n"""
 
     buffer.write(
         f"""
-        super({datatype_class}, self).__init__('{sanitize_identifier(node.name_property)}')
+        super({datatype_class}, self).__init__('{node.name_property}')
 
         if '_parent' in kwargs:
             self._parent = kwargs['_parent']
@@ -359,7 +321,7 @@ an instance of :class:`{class_name}`\"\"\")
         # ----------------------------------"""
     )
     for subtype_node in subtype_nodes:
-        name_prop = sanitize_identifier(subtype_node.name_property)
+        name_prop = subtype_node.name_property
         buffer.write(
             f"""
         _v = arg.pop('{name_prop}', None)
@@ -378,7 +340,7 @@ an instance of :class:`{class_name}`\"\"\")
 """
         )
         for literal_node in literal_nodes:
-            lit_name = sanitize_identifier(literal_node.name_property)
+            lit_name = literal_node.name_property
             lit_val = repr(literal_node.node_data)
             buffer.write(
                 f"""
@@ -429,7 +391,7 @@ def add_constructor_params(
     for i, subtype_node in enumerate(subtype_nodes):
         buffer.write(
             f""",
-            {sanitize_identifier(subtype_node.name_property)}=None"""
+            {subtype_node.name_property}=None"""
         )
 
     for extra in append_extras:
@@ -512,7 +474,7 @@ def add_docstring(
     buffer.write(
         f"""
 
-        Returns
+        Returns 
         -------
         {return_type}
         \"\"\""""
@@ -523,8 +485,23 @@ def write_datatype_py(outdir, node):
     """
     Build datatype (graph_objs) class source code and write to a file
     """
+    # Security: Validate that path parts don't contain dangerous components
+    for part in node.parent_path_parts:
+        if not isinstance(part, str):
+            raise ValueError(f"Path part must be string, got {type(part)}")
+        if '..' in part or '/' in part or '\\' in part or part.startswith('.'):
+            raise ValueError(f"Invalid path component: {part!r}")
+
+    # Security: Validate the final path stays within intended directory
     filepath = opath.join(
         outdir, "graph_objs", *node.parent_path_parts, "_" + node.name_undercase + ".py"
     )
+
+    # Ensure the resolved path stays within the outdir
+    abs_outdir = opath.abspath(outdir)
+    abs_filepath = opath.abspath(filepath)
+    if not abs_filepath.startswith(abs_outdir + os.sep):
+        raise ValueError(f"Generated file path escapes output directory: {filepath}")
+
     datatype_source = build_datatype_py(node)
     write_source_py(datatype_source, filepath, leading_newlines=2)

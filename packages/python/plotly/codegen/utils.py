@@ -666,6 +666,26 @@ class PlotlyNode:
         -------
         str
         """
+        # Security validation: reject dangerous path components
+        if not isinstance(p, str):
+            raise ValueError(f"Path component must be string, got {type(p)}")
+
+        # Reject path traversal attempts
+        if '..' in p or p.startswith('.') or '/' in p or '\\' in p:
+            raise ValueError(f"Invalid path component: {p!r}")
+
+        # Reject components with dangerous characters that could break string contexts
+        if any(char in p for char in ['\'', '"', '\\', '\0', '\n', '\r']):
+            raise ValueError(f"Path component contains dangerous characters: {p!r}")
+
+        # Enforce reasonable length limit
+        if len(p) > 100:
+            raise ValueError(f"Path component too long (max 100 chars): {p[:50]}...")
+
+        # Basic pattern validation for plotly schema names
+        if not re.match(r'^[a-zA-Z_][a-zA-Z0-9_]*$', p):
+            raise ValueError(f"Invalid path component format: {p!r}")
+
         return p
 
     @property
